@@ -106,7 +106,7 @@ export function registerDownloadRoute(app: Express) {
         void markConversionFailure(conversionId, error);
 
         if (!res.headersSent) {
-          res.status(500).json({ error: "Error durante la conversión a MP3" });
+          res.status(500).json({ error: getErrorMessage(error) });
           return;
         }
 
