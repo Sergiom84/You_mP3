@@ -1,11 +1,13 @@
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
-import { access, constants as fsConstants } from "fs/promises";
+import { access, constants as fsConstants, mkdir, writeFile } from "fs/promises";
 import { createRequire } from "module";
 import path from "path";
 import { Readable } from "stream";
+import { ENV } from "../_core/env";
 import { isValidYouTubeUrl, extractVideoId } from "./youtube";
 
 const require = createRequire(import.meta.url);
+let generatedCookiesPathPromise: Promise<string | null> | null = null;
 
 export interface ConversionProgress {
   state: "analyzing" | "downloading" | "converting";
@@ -65,6 +67,12 @@ function createMissingYtDlpError(): Error {
   );
 }
 
+function createMissingCookiesError(): Error {
+  return new Error(
+    "YouTube requiere una sesion autenticada. Define YTDLP_COOKIES_BASE64 (recomendado) o YTDLP_COOKIES_PATH en el servidor."
+  );
+}
+
 function normalizeSpawnError(error: Error): Error {
   if ((error as NodeJS.ErrnoException).code === "ENOENT") {
     return createMissingYtDlpError();
@@ -73,11 +81,48 @@ function normalizeSpawnError(error: Error): Error {
   return error;
 }
 
+async function resolveYtDlpCookiesPath(): Promise<string | null> {
+  if (ENV.ytDlpCookiesPath) {
+    try {
+      await access(ENV.ytDlpCookiesPath, fsConstants.R_OK);
+      return ENV.ytDlpCookiesPath;
+    } catch {
+      throw new Error(
+        `YTDLP_COOKIES_PATH no es legible: ${ENV.ytDlpCookiesPath}`
+      );
+    }
+  }
+
+  if (!ENV.ytDlpCookiesBase64 && !ENV.ytDlpCookies) {
+    return null;
+  }
+
+  if (!generatedCookiesPathPromise) {
+    generatedCookiesPathPromise = (async () => {
+      const cookiesDir = path.resolve(process.cwd(), "tmp");
+      const cookiesPath = path.join(cookiesDir, "yt-dlp-cookies.txt");
+      const rawCookies = ENV.ytDlpCookiesBase64
+        ? Buffer.from(ENV.ytDlpCookiesBase64, "base64").toString("utf8")
+        : ENV.ytDlpCookies;
+
+      await mkdir(cookiesDir, { recursive: true });
+      await writeFile(cookiesPath, rawCookies, "utf8");
+      return cookiesPath;
+    })();
+  }
+
+  return generatedCookiesPathPromise;
+}
+
 async function spawnYtDlp(
-  args: string[]
+  args: string[],
+  options: { includeCookies?: boolean } = {}
 ): Promise<ChildProcessWithoutNullStreams> {
+  const includeCookies = options.includeCookies ?? true;
   const command = await resolveYtDlpCommand();
-  const process = spawn(command, args);
+  const cookiesPath = includeCookies ? await resolveYtDlpCookiesPath() : null;
+  const finalArgs = cookiesPath ? ["--cookies", cookiesPath, ...args] : args;
+  const process = spawn(command, finalArgs);
 
   await new Promise<void>((resolve, reject) => {
     const handleSpawn = () => {
@@ -111,6 +156,15 @@ function formatYtDlpFailure(stderrOutput: string, fallbackMessage: string): Erro
 
   if (!cleanedMessage) {
     return new Error(fallbackMessage);
+  }
+
+  if (
+    /sign in to confirm you'?re not a bot/i.test(cleanedMessage) &&
+    !ENV.ytDlpCookiesPath &&
+    !ENV.ytDlpCookiesBase64 &&
+    !ENV.ytDlpCookies
+  ) {
+    return createMissingCookiesError();
   }
 
   return new Error(`${fallbackMessage}: ${cleanedMessage}`);
@@ -249,7 +303,7 @@ export async function convertToMP3Stream(
  */
 export async function validateYtDlpInstallation(): Promise<boolean> {
   try {
-    const process = await spawnYtDlp(["--version"]);
+    const process = await spawnYtDlp(["--version"], { includeCookies: false });
     return await new Promise((resolve) => {
       process.on("close", (code) => {
         resolve(code === 0);
