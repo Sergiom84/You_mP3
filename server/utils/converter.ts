@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { access, constants as fsConstants } from "fs/promises";
 import { createRequire } from "module";
+import path from "path";
 import { Readable } from "stream";
 import { isValidYouTubeUrl, extractVideoId } from "./youtube";
 
@@ -17,6 +18,14 @@ export interface VideoInfo {
   videoId: string;
 }
 
+function getManagedYtDlpPath(): string {
+  return path.resolve(
+    process.cwd(),
+    "bin",
+    process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+  );
+}
+
 function getBundledYtDlpPath(): string | null {
   try {
     const { YOUTUBE_DL_PATH } = require("yt-dlp-exec/src/constants");
@@ -27,6 +36,15 @@ function getBundledYtDlpPath(): string | null {
 }
 
 async function resolveYtDlpCommand(): Promise<string> {
+  const managedBinaryPath = getManagedYtDlpPath();
+
+  try {
+    await access(managedBinaryPath, fsConstants.X_OK);
+    return managedBinaryPath;
+  } catch {
+    // Fall back to the package-managed binary next.
+  }
+
   const bundledBinaryPath = getBundledYtDlpPath();
 
   if (bundledBinaryPath) {
@@ -43,7 +61,7 @@ async function resolveYtDlpCommand(): Promise<string> {
 
 function createMissingYtDlpError(): Error {
   return new Error(
-    "yt-dlp no está disponible. Instala el binario del sistema o ejecuta `pnpm yt-dlp:install` (si tu entorno bloquea scripts, permite también `yt-dlp-exec`)."
+    "yt-dlp no está disponible. Instala el binario del sistema o ejecuta `pnpm yt-dlp:install`."
   );
 }
 
@@ -82,6 +100,22 @@ async function spawnYtDlp(
   return process;
 }
 
+function formatYtDlpFailure(stderrOutput: string, fallbackMessage: string): Error {
+  const cleanedMessage = stderrOutput
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(" | ");
+
+  if (!cleanedMessage) {
+    return new Error(fallbackMessage);
+  }
+
+  return new Error(`${fallbackMessage}: ${cleanedMessage}`);
+}
+
 /**
  * Get video information from YouTube URL without downloading
  */
@@ -96,26 +130,35 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
   }
 
   const process = await spawnYtDlp([
-    url,
+    "--no-playlist",
     "--dump-json",
     "--quiet",
     "--no-warnings",
+    url,
   ]);
 
   return new Promise((resolve, reject) => {
     let output = "";
+    let stderrOutput = "";
 
     process.stdout.on("data", (data) => {
       output += data.toString();
     });
 
     process.stderr.on("data", (data) => {
-      console.error("[Converter] yt-dlp stderr:", data.toString());
+      const chunk = data.toString();
+      stderrOutput += chunk;
+      console.error("[Converter] yt-dlp stderr:", chunk);
     });
 
     process.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error("No se pudo obtener información del video"));
+        reject(
+          formatYtDlpFailure(
+            stderrOutput,
+            "No se pudo obtener información del video"
+          )
+        );
         return;
       }
 
@@ -165,7 +208,7 @@ export async function convertToMP3Stream(
 
     // Execute yt-dlp to extract audio as MP3 and stream to stdout
     const ytdlpProcess = await spawnYtDlp([
-      url,
+      "--no-playlist",
       "-f",
       "bestaudio/best",
       "-x",
@@ -177,6 +220,7 @@ export async function convertToMP3Stream(
       "-",
       "--quiet",
       "--no-warnings",
+      url,
     ]);
 
     // Handle errors

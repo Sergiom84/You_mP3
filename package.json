@@ -4,7 +4,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "postinstall": "node node_modules/yt-dlp-exec/scripts/postinstall.js",
+    "postinstall": "node scripts/install-ytdlp.mjs",
     "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
     "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "start": "cross-env NODE_ENV=production node dist/index.js",
@@ -12,7 +12,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
-    "yt-dlp:install": "node node_modules/yt-dlp-exec/scripts/postinstall.js"
+    "yt-dlp:install": "node scripts/install-ytdlp.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.693.0",
