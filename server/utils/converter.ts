@@ -2,7 +2,7 @@ import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { access, constants as fsConstants, mkdir, writeFile } from "fs/promises";
 import { createRequire } from "module";
 import path from "path";
-import { Readable } from "stream";
+import { PassThrough, Readable } from "stream";
 import { ENV } from "../_core/env";
 import { isValidYouTubeUrl, extractVideoId } from "./youtube";
 
@@ -297,18 +297,55 @@ export async function convertToMP3Stream(
       url,
     ]);
 
+    const outputStream = new PassThrough();
+    let stderrOutput = "";
+    let stdoutEnded = false;
+    let processClosed = false;
+    let exitCode: number | null = null;
+
+    const finalizeSuccessIfReady = () => {
+      if (stdoutEnded && processClosed && exitCode === 0) {
+        outputStream.end();
+      }
+    };
+
     // Handle errors
     ytdlpProcess.stderr.on("data", (data) => {
-      console.error("[Converter] yt-dlp stderr:", data.toString());
+      const chunk = data.toString();
+      stderrOutput += chunk;
+      console.error("[Converter] yt-dlp stderr:", chunk);
     });
-      ytdlpProcess.on("close", (code) => {
+
+    ytdlpProcess.stdout.on("data", (chunk) => {
+      outputStream.write(chunk);
+    });
+
+    ytdlpProcess.stdout.on("end", () => {
+      stdoutEnded = true;
+      finalizeSuccessIfReady();
+    });
+
+    ytdlpProcess.stdout.on("error", (error) => {
+      outputStream.destroy(error);
+    });
+
+    ytdlpProcess.on("close", (code) => {
+      processClosed = true;
+      exitCode = code;
+
       if (code !== 0) {
         console.error(`[Converter] yt-dlp exited with code ${code}`);
+        outputStream.destroy(
+          formatYtDlpFailure(stderrOutput, "Error durante la conversión a MP3")
+        );
+        return;
       }
+
+      finalizeSuccessIfReady();
     });
 
     return {
-      stream: ytdlpProcess.stdout,
+      stream: outputStream,
       filename,
       videoInfo,
     };
