@@ -184,8 +184,10 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
   }
 
   const process = await spawnYtDlp([
+    "--ignore-config",
     "--no-playlist",
-    "--dump-json",
+    "--skip-download",
+    "--dump-single-json",
     "--quiet",
     "--no-warnings",
     url,
@@ -245,9 +247,26 @@ export async function convertToMP3Stream(
     throw new Error("URL de YouTube inválida");
   }
 
+  const videoId = extractVideoId(url);
+  if (!videoId) {
+    throw new Error("No se pudo extraer el ID del video");
+  }
+
   try {
-    // Get video info first
-    const videoInfo = await getVideoInfo(url);
+    let videoInfo: VideoInfo;
+    try {
+      videoInfo = await getVideoInfo(url);
+    } catch (error) {
+      console.warn(
+        "[Converter] Metadata fallback activated, using video ID as filename seed:",
+        error
+      );
+      videoInfo = {
+        title: videoId,
+        duration: 0,
+        videoId,
+      };
+    }
 
     // Create a safe filename from the title
     const safeTitle = videoInfo.title
@@ -262,6 +281,7 @@ export async function convertToMP3Stream(
 
     // Execute yt-dlp to extract audio as MP3 and stream to stdout
     const ytdlpProcess = await spawnYtDlp([
+      "--ignore-config",
       "--no-playlist",
       "-f",
       "bestaudio/best",
@@ -281,7 +301,7 @@ export async function convertToMP3Stream(
     ytdlpProcess.stderr.on("data", (data) => {
       console.error("[Converter] yt-dlp stderr:", data.toString());
     });
-    ytdlpProcess.on("close", (code) => {
+      ytdlpProcess.on("close", (code) => {
       if (code !== 0) {
         console.error(`[Converter] yt-dlp exited with code ${code}`);
       }
@@ -294,6 +314,9 @@ export async function convertToMP3Stream(
     };
   } catch (error) {
     console.error("[Converter] Error converting to MP3:", error);
+    if (error instanceof Error) {
+      throw error;
+    }
     throw new Error("Error durante la conversión a MP3");
   }
 }

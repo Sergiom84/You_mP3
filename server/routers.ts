@@ -26,17 +26,17 @@ export const appRouter = router({
         return { url: obj.url };
       })
       .mutation(async ({ input }) => {
-        const { isValidYouTubeUrl } = await import("./utils/youtube");
+        const { extractVideoId, isValidYouTubeUrl, normalizeYouTubeUrl } =
+          await import("./utils/youtube");
         if (!isValidYouTubeUrl(input.url)) {
           return { valid: false, error: "URL de YouTube inválida" };
         }
-        try {
-          const { getVideoInfo } = await import("./utils/converter");
-          const info = await getVideoInfo(input.url);
-          return { valid: true, info };
-        } catch (error) {
-          return { valid: false, error: (error as Error).message };
-        }
+
+        return {
+          valid: true,
+          normalizedUrl: normalizeYouTubeUrl(input.url),
+          videoId: extractVideoId(input.url),
+        };
       }),
 
     convert: protectedProcedure
