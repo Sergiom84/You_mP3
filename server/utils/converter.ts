@@ -6,6 +6,12 @@ import { PassThrough, Readable } from "stream";
 import { ENV } from "../_core/env";
 import { isValidYouTubeUrl, extractVideoId } from "./youtube";
 
+function spawnFfmpeg(
+  args: string[]
+): ChildProcessWithoutNullStreams {
+  return spawn("ffmpeg", args);
+}
+
 const require = createRequire(import.meta.url);
 let generatedCookiesPathPromise: Promise<string | null> | null = null;
 
@@ -190,7 +196,7 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
     "--dump-single-json",
     "--no-check-formats",
     "--extractor-args",
-    "youtube:player_client=mediaconnect,web",
+    "youtube:player_client=android,web",
     "--quiet",
     "--no-warnings",
     url,
@@ -282,20 +288,17 @@ export async function convertToMP3Stream(
 
     const filename = `${safeTitle}.mp3`;
 
-    // Execute yt-dlp to extract audio as MP3 and stream to stdout
+    // yt-dlp streams raw audio to stdout, then ffmpeg converts to mp3.
+    // Post-processing flags (-x, --audio-format) don't work with -o - so
+    // we pipe through ffmpeg explicitly.
     const ytdlpProcess = await spawnYtDlp([
       "--ignore-config",
       "--no-playlist",
       "-f",
       "bestaudio/best",
-      "-x",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      "192K",
       "--no-check-formats",
       "--extractor-args",
-      "youtube:player_client=mediaconnect,web",
+      "youtube:player_client=android,web",
       "-o",
       "-",
       "--quiet",
@@ -303,51 +306,75 @@ export async function convertToMP3Stream(
       url,
     ]);
 
+    const ffmpegProcess = spawnFfmpeg([
+      "-i",
+      "pipe:0",
+      "-f",
+      "mp3",
+      "-ab",
+      "192k",
+      "-vn",
+      "-loglevel",
+      "error",
+      "pipe:1",
+    ]);
+
     const outputStream = new PassThrough();
-    let stderrOutput = "";
-    let stdoutEnded = false;
-    let processClosed = false;
-    let exitCode: number | null = null;
+    let ytdlpStderr = "";
+    let ffmpegStderr = "";
 
-    const finalizeSuccessIfReady = () => {
-      if (stdoutEnded && processClosed && exitCode === 0) {
-        outputStream.end();
-      }
-    };
+    // Pipe yt-dlp stdout → ffmpeg stdin
+    ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
 
-    // Handle errors
+    // Collect stderr from both processes
     ytdlpProcess.stderr.on("data", (data) => {
       const chunk = data.toString();
-      stderrOutput += chunk;
+      ytdlpStderr += chunk;
       console.error("[Converter] yt-dlp stderr:", chunk);
     });
 
-    ytdlpProcess.stdout.on("data", (chunk) => {
+    ffmpegProcess.stderr.on("data", (data) => {
+      const chunk = data.toString();
+      ffmpegStderr += chunk;
+      console.error("[Converter] ffmpeg stderr:", chunk);
+    });
+
+    // Pipe ffmpeg stdout → output stream
+    ffmpegProcess.stdout.on("data", (chunk) => {
       outputStream.write(chunk);
     });
 
-    ytdlpProcess.stdout.on("end", () => {
-      stdoutEnded = true;
-      finalizeSuccessIfReady();
-    });
-
-    ytdlpProcess.stdout.on("error", (error) => {
+    ffmpegProcess.stdout.on("error", (error) => {
       outputStream.destroy(error);
     });
 
+    // If yt-dlp fails, kill ffmpeg and report the error
     ytdlpProcess.on("close", (code) => {
-      processClosed = true;
-      exitCode = code;
-
       if (code !== 0) {
         console.error(`[Converter] yt-dlp exited with code ${code}`);
+        ffmpegProcess.kill();
         outputStream.destroy(
-          formatYtDlpFailure(stderrOutput, "Error durante la conversión a MP3")
+          formatYtDlpFailure(ytdlpStderr, "Error durante la conversión a MP3")
+        );
+      }
+    });
+
+    // When ffmpeg finishes, finalize the output stream
+    ffmpegProcess.on("close", (code) => {
+      if (code !== 0 && !outputStream.destroyed) {
+        console.error(`[Converter] ffmpeg exited with code ${code}`);
+        outputStream.destroy(
+          new Error(`Error durante la conversión a MP3: ffmpeg exit ${code}`)
         );
         return;
       }
+      if (!outputStream.destroyed) {
+        outputStream.end();
+      }
+    });
 
-      finalizeSuccessIfReady();
+    ytdlpProcess.stdout.on("error", () => {
+      ffmpegProcess.kill();
     });
 
     return {

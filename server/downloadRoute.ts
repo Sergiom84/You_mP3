@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { saveConversion, updateConversionStatus } from "./db";
 import { AUTH_ENABLED } from "./_core/env";
 import { sdk } from "./_core/sdk";
+import { buildAttachmentContentDisposition } from "./utils/contentDisposition";
 import { convertToMP3Stream } from "./utils/converter";
 import { isValidYouTubeUrl, normalizeYouTubeUrl } from "./utils/youtube";
 
@@ -94,7 +95,10 @@ export function registerDownloadRoute(app: Express) {
       let streamEnded = false;
 
       res.setHeader("Content-Type", "audio/mpeg");
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader(
+        "Content-Disposition",
+        buildAttachmentContentDisposition(filename)
+      );
       res.setHeader("Cache-Control", "no-store");
 
       stream.once("end", () => {
